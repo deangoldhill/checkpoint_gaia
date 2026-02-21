@@ -1,0 +1,102 @@
+import aiohttp
+import re
+from datetime import timedelta
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from .const import DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD, CONF_VERIFY_SSL, CONF_API_VERSION, DEFAULT_SCAN_INTERVAL
+
+class GaiaCoordinator(DataUpdateCoordinator):
+    def __init__(self, hass: HomeAssistant, entry):
+        super().__init__(
+            hass, logger=__name__, name=DOMAIN,
+            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+        )
+        self.host = entry.data[CONF_HOST]
+        self.port = entry.data.get(CONF_PORT, 443)
+        self.username = entry.data[CONF_USERNAME]
+        self.password = entry.data[CONF_PASSWORD]
+        self.verify_ssl = entry.data.get(CONF_VERIFY_SSL, False)
+        self.api_version = entry.data.get(CONF_API_VERSION, "v1.8")
+        self.sid = None
+        self.base_url = f"https://{self.host}:{self.port}/gaia_api"
+
+    async def _async_update_data(self):
+        if not self.sid:
+            await self._login()
+
+        try:
+            data = {}
+
+            asset = await self._api_post(f"/{self.api_version}/show-asset")
+            data["serial_number"] = asset.get("serial-number") or asset.get("serial_number", "Unknown")
+
+            cpu = await self._api_post(f"/{self.api_version}/show-cpu-usage")
+            data["cpu_usage"] = float(cpu.get("cpu-usage", cpu.get("percent", 0)))
+
+            mem = await self._api_post(f"/{self.api_version}/show-memory-usage")
+            data["memory_usage"] = float(mem.get("memory-usage", mem.get("percent", 0)))
+
+            routes = await self._api_post(f"/{self.api_version}/show-routes")
+            data["routes_count"] = len(routes.get("routes", routes.get("static-routes", [])))
+
+            ifaces = await self._api_post(f"/{self.api_version}/show-interfaces")
+            data["interfaces"] = ifaces.get("interfaces", ifaces.get("physical-interfaces", []))
+
+            sessions_raw = await self._run_script("cpstat fw -f connections | grep '^connections' | awk '{print $2}'")
+            data["sessions"] = int(sessions_raw.get("output", "0").strip() or 0)
+
+            ver = await self._api_post(f"/{self.api_version}/show-version")
+            data["version"] = f"{ver.get('product-version', 'Unknown')} (Build {ver.get('os-build', '')})"
+
+            uptime_raw = await self._run_script("show uptime")
+            data["uptime"] = uptime_raw.get("output", "Unknown").strip()
+
+            content_raw = await self._run_script("cpinfo -y all | grep -E 'IPS|Threat|Anti|Content|Jumbo' | head -5")
+            data["content_package"] = content_raw.get("output", "N/A").strip() or "N/A"
+
+            perf_raw = await self._run_script("cpstat fw -f perf")
+            output = perf_raw.get("output", "")
+
+            match_throughput = re.search(r"bytes per second.*?(\d+).*?(\d+)", output, re.IGNORECASE | re.DOTALL)
+            if match_throughput:
+                total_bytes = int(match_throughput.group(1)) + int(match_throughput.group(2))
+                data["throughput_mbps"] = round(total_bytes / 1_000_000, 2)
+            else:
+                data["throughput_mbps"] = 0
+
+            match_sps = re.search(r"new conns? per sec.*?(\d+)", output, re.IGNORECASE)
+            data["sessions_per_second"] = int(match_sps.group(1)) if match_sps else 0
+
+            vpn_raw = await self._run_script("cpstat vpn -f all")
+            data["vpn_status"] = "Up" if "up" in vpn_raw.get("output", "").lower() or "active" in vpn_raw.get("output", "").lower() else "Down"
+
+            return data
+
+        except aiohttp.ClientResponseError as err:
+            if err.status in (401, 403):
+                self.sid = None
+                raise ConfigEntryAuthFailed("GAIA session expired") from err
+            raise UpdateFailed(f"API error: {err}") from err
+        except Exception as err:
+            raise UpdateFailed(f"Update failed: {err}") from err
+
+    async def _login(self):
+        url = f"{self.base_url}/login"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={"user": self.username, "password": self.password}, ssl=self.verify_ssl) as resp:
+                resp.raise_for_status()
+                self.sid = (await resp.json()).get("sid")
+
+    async def _api_post(self, endpoint, payload=None):
+        if payload is None:
+            payload = {}
+        url = f"{self.base_url}{endpoint}"
+        headers = {"X-chkp-sid": self.sid, "Content-Type": "application/json"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, ssl=self.verify_ssl) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+
+    async def _run_script(self, command: str):
+        return await self._api_post(f"/{self.api_version}/run-script", {"command": command})
