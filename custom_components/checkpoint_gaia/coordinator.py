@@ -1,15 +1,20 @@
 import aiohttp
 import re
+import logging
 from datetime import timedelta
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from .const import DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD, CONF_VERIFY_SSL, CONF_API_VERSION, DEFAULT_SCAN_INTERVAL
 
+_LOGGER = logging.getLogger(__name__)
+
 class GaiaCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, entry):
         super().__init__(
-            hass, logger=__name__, name=DOMAIN,
+            hass,
+            logger=_LOGGER,          # ← FIXED: proper Logger object
+            name=DOMAIN,
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
         self.host = entry.data[CONF_HOST]
