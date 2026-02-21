@@ -1,0 +1,11 @@
+{
+  "domain": "checkpoint_gaia",
+  "name": "Check Point Gaia",
+  "version": "1.2.0",
+  "codeowners": ["@deangoldhill"],
+  "config_flow": true,
+  "documentation": "https://github.com/deangoldhill/checkpoint_gaia",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/deangoldhill/checkpoint_gaia/issues",
+  "requirements": []
+}
